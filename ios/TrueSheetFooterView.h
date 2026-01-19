@@ -11,17 +11,23 @@
 #import <React/RCTSurfaceTouchHandler.h>
 #import <React/RCTViewComponentView.h>
 #import <UIKit/UIKit.h>
-#import "core/TrueSheetKeyboardObserver.h"
 
 @class TrueSheetViewController;
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface TrueSheetFooterView : RCTViewComponentView <TrueSheetKeyboardObserverDelegate>
+@protocol TrueSheetFooterViewDelegate <NSObject>
+- (void)footerViewDidChangeBottomInset:(CGFloat)bottomInset;
+@end
 
-@property (nonatomic, weak, nullable) TrueSheetKeyboardObserver *keyboardObserver;
+@interface TrueSheetFooterView : RCTViewComponentView
+
+@property (nonatomic, weak, nullable) id<TrueSheetFooterViewDelegate> delegate;
+@property (nonatomic, readonly) CGFloat currentBottomInset;
 
 - (void)setupConstraintsWithHeight:(CGFloat)height;
+- (void)setupKeyboardHandler;
+- (void)cleanupKeyboardHandler;
 
 @end
 

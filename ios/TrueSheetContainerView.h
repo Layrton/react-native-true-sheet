@@ -29,6 +29,12 @@ NS_ASSUME_NONNULL_BEGIN
  */
 - (void)containerViewHeaderDidChangeSize:(CGSize)newSize;
 
+/**
+ * Called when the footer inset changes
+ * @param footerHeight The new footer height for scroll insets
+ */
+- (void)containerViewFooterDidChangeInset:(CGFloat)footerHeight;
+
 @end
 
 @interface TrueSheetContainerView : RCTViewComponentView
@@ -39,19 +45,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, weak, nullable) id<TrueSheetContainerViewDelegate> delegate;
 
 /**
- * Enable scrollable content
+ * Enable ScrollView pinning
  */
-@property (nonatomic, assign) BOOL scrollableEnabled;
-
-/**
- * Inset adjustment mode for scrollable content
- */
-@property (nonatomic, copy, nullable) NSString *insetAdjustment;
-
-/**
- * Options for scrollable behavior
- */
-@property (nonatomic, strong, nullable) NSDictionary *scrollableOptions;
+@property (nonatomic, assign) BOOL scrollViewPinningEnabled;
 
 /**
  * Returns the current content height
@@ -69,20 +65,25 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)layoutFooter;
 
 /**
- * Setup scrollable content
+ * Setup ScrollView pinning
  */
-- (void)setupScrollable;
+- (void)setupContentScrollViewPinning;
 
 /**
- * Setup keyboard observer for content and footer
- * @param viewController The sheet view controller to observe keyboard events for
+ * Setup keyboard handler for footer
  */
-- (void)setupKeyboardObserverWithViewController:(UIViewController *)viewController;
+- (void)setupKeyboardHandler;
 
 /**
- * Cleanup keyboard observer
+ * Cleanup keyboard handler for footer
  */
-- (void)cleanupKeyboardObserver;
+- (void)cleanupKeyboardHandler;
+
+/**
+ * Set the footer height cache externally (e.g., from TrueSheetView)
+ * Used when remounting container to preserve footer height across instances
+ */
+- (void)setExternalFooterHeightCache:(CGFloat)footerHeight;
 
 @end
 

@@ -50,9 +50,7 @@ using namespace facebook::react;
   UIView *_snapshotView;
   CGSize _lastStateSize;
   NSInteger _initialDetentIndex;
-  NSString *_insetAdjustment;
   BOOL _scrollable;
-  NSDictionary *_scrollableOptions;
   BOOL _initialDetentAnimated;
   BOOL _isSheetUpdatePending;
   BOOL _pendingLayoutUpdate;
@@ -61,6 +59,7 @@ using namespace facebook::react;
   BOOL _pendingNavigationRepresent;
   BOOL _pendingMountEvent;
   RNScreensEventObserver *_screensEventObserver;
+  CGFloat _footerHeightCache;
 }
 
 #pragma mark - Initialization
@@ -84,6 +83,7 @@ using namespace facebook::react;
     _initialDetentAnimated = YES;
     _scrollable = NO;
     _isSheetUpdatePending = NO;
+    _footerHeightCache = 0;
 
     _screensEventObserver = [[RNScreensEventObserver alloc] init];
     _screensEventObserver.delegate = self;
@@ -237,26 +237,10 @@ using namespace facebook::react;
   _initialDetentAnimated = newProps.initialDetentAnimated;
   _scrollable = newProps.scrollable;
 
-  const auto &scrollableOpts = newProps.scrollableOptions;
-  BOOL hasScrollableOptions = scrollableOpts.keyboardScrollOffset > 0;
-
-  if (hasScrollableOptions) {
-    NSMutableDictionary *options = [NSMutableDictionary dictionary];
-    if (scrollableOpts.keyboardScrollOffset > 0) {
-      options[@"keyboardScrollOffset"] = @(scrollableOpts.keyboardScrollOffset);
-    }
-    _scrollableOptions = options;
-  } else {
-    _scrollableOptions = nil;
-  }
-
-  _insetAdjustment = RCTNSStringFromString(toString(newProps.insetAdjustment));
-  _controller.insetAdjustment = _insetAdjustment;
+  _controller.insetAdjustment = RCTNSStringFromString(toString(newProps.insetAdjustment));
 
   if (_containerView) {
-    _containerView.scrollableEnabled = _scrollable;
-    _containerView.insetAdjustment = _insetAdjustment;
-    _containerView.scrollableOptions = _scrollableOptions;
+    _containerView.scrollViewPinningEnabled = _scrollable;
   }
 }
 
@@ -299,7 +283,7 @@ using namespace facebook::react;
     return;
 
   if (_containerView) {
-    [_containerView setupScrollable];
+    [_containerView setupContentScrollViewPinning];
   }
 
   if (_controller.isPresented) {
@@ -366,10 +350,13 @@ using namespace facebook::react;
     _controller.headerHeight = @(headerHeight);
   }
 
-  _containerView.scrollableEnabled = _scrollable;
-  _containerView.insetAdjustment = _insetAdjustment;
-  _containerView.scrollableOptions = _scrollableOptions;
-  [_containerView setupScrollable];
+  _containerView.scrollViewPinningEnabled = _scrollable;
+
+  if (_footerHeightCache > 0) {
+    [_containerView setExternalFooterHeightCache:_footerHeightCache];
+  }
+
+  [_containerView setupContentScrollViewPinning];
 
   if (_eventEmitter) {
     [TrueSheetLifecycleEvents emitMount:_eventEmitter];
@@ -414,7 +401,9 @@ using namespace facebook::react;
   }
 
   if (_controller.isPresented) {
-    RCTLogWarn(@"TrueSheet: sheet is already presented. Use resize() to change detent.");
+    [_controller.sheetPresentationController animateChanges:^{
+      [self->_controller resizeToDetentIndex:index];
+    }];
     if (completion) {
       completion(YES, nil);
     }
@@ -477,13 +466,7 @@ using namespace facebook::react;
     return;
   }
 
-  [_controller.sheetPresentationController animateChanges:^{
-    [self->_controller resizeToDetentIndex:index];
-  }];
-
-  if (completion) {
-    completion(YES, nil);
-  }
+  [self presentAtIndex:index animated:YES completion:completion];
 }
 
 - (TrueSheetViewController *)viewController {
@@ -540,6 +523,10 @@ using namespace facebook::react;
   [self setupSheetDetentsForSizeChange];
 }
 
+- (void)containerViewFooterDidChangeInset:(CGFloat)footerHeight {
+  _footerHeightCache = footerHeight;
+}
+
 #pragma mark - TrueSheetViewControllerDelegate
 
 - (void)viewControllerWillPresentAtIndex:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent {
@@ -548,7 +535,7 @@ using namespace facebook::react;
 }
 
 - (void)viewControllerDidPresentAtIndex:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent {
-  [_containerView setupKeyboardObserverWithViewController:_controller];
+  [_containerView setupKeyboardHandler];
   [TrueSheetLifecycleEvents emitDidPresent:_eventEmitter index:index position:position detent:detent];
 }
 
@@ -579,7 +566,7 @@ using namespace facebook::react;
 }
 
 - (void)viewControllerDidDismiss {
-  [_containerView cleanupKeyboardObserver];
+  [_containerView cleanupKeyboardHandler];
   if (!_dismissedByNavigation) {
     _dismissedByNavigation = NO;
     _pendingNavigationRepresent = NO;

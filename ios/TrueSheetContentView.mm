@@ -9,23 +9,34 @@
 #ifdef RCT_NEW_ARCH_ENABLED
 
 #import "TrueSheetContentView.h"
+#import "TrueSheetView.h"
+#import "TrueSheetViewController.h"
+#import "utils/LayoutUtil.h"
+#import "utils/UIView+FirstResponder.h"
 #import <React/RCTScrollViewComponentView.h>
 #import <react/renderer/components/TrueSheetSpec/ComponentDescriptors.h>
 #import <react/renderer/components/TrueSheetSpec/EventEmitters.h>
 #import <react/renderer/components/TrueSheetSpec/Props.h>
 #import <react/renderer/components/TrueSheetSpec/RCTComponentViewHelpers.h>
-#import "TrueSheetView.h"
-#import "TrueSheetViewController.h"
-#import "utils/UIView+FirstResponder.h"
 
 using namespace facebook::react;
 
+static NSString *const TrueSheetDisableFooterInsetFixKey = @"TrueSheetDisableFooterInsetFix";
+static CGFloat const kScrollVisibilityBuffer = 30.0;
+
 @implementation TrueSheetContentView {
   RCTScrollViewComponentView *_pinnedScrollView;
+  UIView *_pinnedTopView;
   CGSize _lastSize;
-  CGFloat _bottomInset;
-  CGFloat _originalScrollViewHeight;
-  CGFloat _originalIndicatorBottomInset;
+  UIEdgeInsets _contentInsets;
+  UIEdgeInsets _pinnedInsets;
+  CGFloat _footerHeight;
+  CGFloat _appliedFooterInset;
+  UIScrollViewContentInsetAdjustmentBehavior _originalAdjustmentBehavior;
+  BOOL _didOverrideAdjustmentBehavior;
+  CGFloat _keyboardHeight;
+  BOOL _isObservingKeyboard;
+  CGFloat _lastSetContentInset;
 }
 
 + (ComponentDescriptorProvider)componentDescriptorProvider {
@@ -36,8 +47,22 @@ using namespace facebook::react;
   if (self = [super initWithFrame:frame]) {
     static const auto defaultProps = std::make_shared<const TrueSheetContentViewProps>();
     _props = defaultProps;
+    _footerHeight = 0;
+    _appliedFooterInset = 0;
+    _didOverrideAdjustmentBehavior = NO;
+    _keyboardHeight = 0;
+    _isObservingKeyboard = NO;
+    _lastSetContentInset = -1;
   }
   return self;
+}
+
+- (BOOL)isFooterInsetFixDisabled {
+  id plistValue = [[NSBundle mainBundle] objectForInfoDictionaryKey:TrueSheetDisableFooterInsetFixKey];
+  if ([plistValue isKindOfClass:[NSNumber class]]) {
+    return ((NSNumber *)plistValue).boolValue;
+  }
+  return NO;
 }
 
 #pragma mark - Layout
@@ -45,6 +70,14 @@ using namespace facebook::react;
 - (void)updateLayoutMetrics:(const LayoutMetrics &)layoutMetrics
            oldLayoutMetrics:(const LayoutMetrics &)oldLayoutMetrics {
   [super updateLayoutMetrics:layoutMetrics oldLayoutMetrics:oldLayoutMetrics];
+
+  UIEdgeInsets newInsets = UIEdgeInsetsMake(layoutMetrics.contentInsets.top, layoutMetrics.contentInsets.left,
+    layoutMetrics.contentInsets.bottom, layoutMetrics.contentInsets.right);
+
+  if (!UIEdgeInsetsEqualToEdgeInsets(newInsets, _contentInsets)) {
+    _contentInsets = newInsets;
+    [self.delegate contentViewDidChangeInsets];
+  }
 
   CGSize newSize = CGSizeMake(layoutMetrics.frame.size.width, layoutMetrics.frame.size.height);
   if (!CGSizeEqualToSize(newSize, _lastSize)) {
@@ -65,90 +98,273 @@ using namespace facebook::react;
   [self.delegate contentViewDidChangeChildren];
 }
 
-#pragma mark - Scrollable
+#pragma mark - ScrollView Pinning
 
-- (void)clearScrollable {
+- (void)clearPinning {
+  [self cleanupKeyboardObserver];
   if (_pinnedScrollView) {
-    CGRect frame = _pinnedScrollView.frame;
-    frame.size.height = _originalScrollViewHeight;
-    _pinnedScrollView.frame = frame;
+    if (_didOverrideAdjustmentBehavior) {
+      _pinnedScrollView.scrollView.contentInsetAdjustmentBehavior = _originalAdjustmentBehavior;
+      _didOverrideAdjustmentBehavior = NO;
+    }
+    if (_appliedFooterInset > 0) {
+      UIScrollView *scrollView = _pinnedScrollView.scrollView;
+      UIEdgeInsets contentInset = scrollView.contentInset;
+      contentInset.bottom = MAX(0, contentInset.bottom - _appliedFooterInset);
+      scrollView.contentInset = contentInset;
 
-    UIEdgeInsets contentInset = _pinnedScrollView.scrollView.contentInset;
-    contentInset.bottom = 0;
-    _pinnedScrollView.scrollView.contentInset = contentInset;
+      UIEdgeInsets indicatorInset = scrollView.scrollIndicatorInsets;
+      indicatorInset.bottom = MAX(0, indicatorInset.bottom - _appliedFooterInset);
+      scrollView.scrollIndicatorInsets = indicatorInset;
 
-    UIEdgeInsets indicatorInsets = _pinnedScrollView.scrollView.verticalScrollIndicatorInsets;
-    indicatorInsets.bottom = _originalIndicatorBottomInset;
-    _pinnedScrollView.scrollView.verticalScrollIndicatorInsets = indicatorInsets;
+      _appliedFooterInset = 0;
+    }
+    [LayoutUtil unpinView:_pinnedScrollView fromParentView:self];
+    [LayoutUtil unpinView:_pinnedScrollView fromParentView:self.superview];
   }
   _pinnedScrollView = nil;
-  _bottomInset = 0;
-  _originalScrollViewHeight = 0;
-  _originalIndicatorBottomInset = 0;
+  _pinnedTopView = nil;
+  _pinnedInsets = UIEdgeInsetsZero;
+  _lastSetContentInset = -1;
 }
 
-- (void)setupScrollable:(BOOL)enabled bottomInset:(CGFloat)bottomInset {
-  if (!enabled) {
-    [self clearScrollable];
-    return;
-  }
-
-  // Already set up with same inset
-  if (_pinnedScrollView && _bottomInset == bottomInset) {
-    return;
-  }
-
-  RCTScrollViewComponentView *scrollView = [self findScrollView];
-  if (!scrollView) {
-    return;
-  }
-
-  // Only capture originals on first pin
-  if (!_pinnedScrollView) {
-    _originalScrollViewHeight = scrollView.frame.size.height;
-    _originalIndicatorBottomInset = scrollView.scrollView.verticalScrollIndicatorInsets.bottom;
-    _pinnedScrollView = scrollView;
-  }
-
-  _bottomInset = bottomInset;
-
-  [self updateScrollViewHeight];
-
-  UIEdgeInsets contentInset = scrollView.scrollView.contentInset;
-  contentInset.bottom = bottomInset;
-  scrollView.scrollView.contentInset = contentInset;
-
-  UIEdgeInsets indicatorInsets = scrollView.scrollView.verticalScrollIndicatorInsets;
-  indicatorInsets.bottom = _originalIndicatorBottomInset + bottomInset;
-  scrollView.scrollView.verticalScrollIndicatorInsets = indicatorInsets;
-}
-
-- (void)updateScrollViewHeight {
-  if (!_pinnedScrollView) {
-    return;
-  }
-
+- (void)setupScrollViewPinning:(BOOL)pinned {
   UIView *containerView = self.superview;
-  if (!containerView) {
+
+  if (!pinned) {
+    [self clearPinning];
     return;
   }
 
-  CGRect scrollViewFrameInContainer = [_pinnedScrollView.superview convertRect:_pinnedScrollView.frame
-                                                                        toView:containerView];
-  CGFloat newHeight = containerView.bounds.size.height - scrollViewFrameInContainer.origin.y;
+  UIView *topSibling = nil;
+  RCTScrollViewComponentView *scrollView = [self findScrollView:&topSibling];
 
-  if (newHeight > 0) {
-    CGRect frame = _pinnedScrollView.frame;
-    frame.size.height = newHeight;
-    _pinnedScrollView.frame = frame;
+  BOOL needsUpdate = scrollView != _pinnedScrollView || topSibling != _pinnedTopView ||
+                     !UIEdgeInsetsEqualToEdgeInsets(_contentInsets, _pinnedInsets);
+
+  if (scrollView && containerView && needsUpdate) {
+    [self clearPinning];
+
+    UIEdgeInsets insets =
+      UIEdgeInsetsMake(topSibling ? 0 : _contentInsets.top, _contentInsets.left, 0, _contentInsets.right);
+
+    if (topSibling) {
+      [LayoutUtil pinView:scrollView
+             toParentView:self
+              withTopView:topSibling
+                    edges:UIRectEdgeLeft | UIRectEdgeRight
+                   insets:insets];
+    } else {
+      [LayoutUtil pinView:scrollView
+             toParentView:self
+                    edges:UIRectEdgeTop | UIRectEdgeLeft | UIRectEdgeRight
+                   insets:insets];
+    }
+
+    [LayoutUtil pinView:scrollView toParentView:containerView edges:UIRectEdgeBottom];
+
+    _pinnedScrollView = scrollView;
+    _pinnedTopView = topSibling;
+    _pinnedInsets = _contentInsets;
+
+    [self applyFooterSafeArea];
+    [self setupKeyboardObserver];
+  } else if (!scrollView && _pinnedScrollView) {
+    [self clearPinning];
   }
 }
 
-- (RCTScrollViewComponentView *)findScrollView {
-  if (_pinnedScrollView) {
-    return _pinnedScrollView;
+#pragma mark - Footer Safe Area
+
+- (void)setupKeyboardObserver {
+  if (_isObservingKeyboard) {
+    return;
+  }
+  [[NSNotificationCenter defaultCenter] addObserver:self
+                                           selector:@selector(keyboardWillChangeFrame:)
+                                               name:UIKeyboardWillChangeFrameNotification
+                                             object:nil];
+  _isObservingKeyboard = YES;
+}
+
+- (void)cleanupKeyboardObserver {
+  if (!_isObservingKeyboard) {
+    return;
+  }
+  [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                  name:UIKeyboardWillChangeFrameNotification
+                                                object:nil];
+  _isObservingKeyboard = NO;
+  _keyboardHeight = 0;
+}
+
+- (void)applyFooterInsetsToScrollView {
+  if (!_pinnedScrollView) {
+    return;
   }
 
+  UIScrollView *scrollView = _pinnedScrollView.scrollView;
+  CGFloat currentBottom = scrollView.contentInset.bottom;
+  CGFloat targetFooterInset = _footerHeight;
+
+  CGFloat baseInset;
+
+  if (_lastSetContentInset < 0) {
+    baseInset = currentBottom;
+  } else if (fabs(currentBottom - _lastSetContentInset) > 0.5) {
+    baseInset = currentBottom;
+  } else {
+    baseInset = currentBottom - _appliedFooterInset;
+  }
+
+  CGFloat targetBottom = baseInset + targetFooterInset;
+
+  UIEdgeInsets targetContentInset = scrollView.contentInset;
+  targetContentInset.bottom = targetBottom;
+
+  UIEdgeInsets targetIndicatorInsets = scrollView.scrollIndicatorInsets;
+  targetIndicatorInsets.bottom = targetBottom;
+
+  if ([self isFooterInsetFixDisabled]) {
+    return;
+  }
+
+  if (!UIEdgeInsetsEqualToEdgeInsets(scrollView.contentInset, targetContentInset)) {
+    scrollView.contentInset = targetContentInset;
+  }
+
+  if (!UIEdgeInsetsEqualToEdgeInsets(scrollView.scrollIndicatorInsets, targetIndicatorInsets)) {
+    scrollView.scrollIndicatorInsets = targetIndicatorInsets;
+  }
+
+  _appliedFooterInset = targetFooterInset;
+  _lastSetContentInset = targetBottom;
+}
+
+- (BOOL)isFirstResponderWithinSheet {
+  TrueSheetViewController *sheetController = [self findSheetViewController];
+  if (!sheetController) {
+    return NO;
+  }
+  UIView *firstResponder = [sheetController.view findFirstResponder];
+  return firstResponder != nil;
+}
+
+- (void)keyboardWillChangeFrame:(NSNotification *)notification {
+  if (!_pinnedScrollView) {
+    return;
+  }
+
+  TrueSheetViewController *sheetController = [self findSheetViewController];
+  if (sheetController && !sheetController.isTopmostPresentedController) {
+    return;
+  }
+
+  if (![self isFirstResponderWithinSheet]) {
+    return;
+  }
+
+  NSDictionary *userInfo = notification.userInfo;
+  CGRect keyboardFrame = [userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+  UIWindow *window = self.window;
+  if (!window) {
+    return;
+  }
+
+  CGRect keyboardFrameInWindow = [window convertRect:keyboardFrame fromWindow:nil];
+  CGFloat keyboardHeight = window.bounds.size.height - keyboardFrameInWindow.origin.y;
+
+  _keyboardHeight = MAX(0, keyboardHeight);
+
+  UIView *firstResponder = [[self findSheetViewController].view findFirstResponder];
+  if (firstResponder) {
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      __strong typeof(weakSelf) strongSelf = weakSelf;
+      if (!strongSelf || !strongSelf->_pinnedScrollView) {
+        return;
+      }
+
+      [strongSelf applyFooterInsetsToScrollView];
+
+      UIView *responder = [[strongSelf findSheetViewController].view findFirstResponder];
+      if (responder) {
+        UIScrollView *scrollView = strongSelf->_pinnedScrollView.scrollView;
+
+        CGFloat currentInsetBottom = scrollView.contentInset.bottom;
+        CGFloat systemComfortPadding = MAX(0, currentInsetBottom - strongSelf->_footerHeight - strongSelf->_keyboardHeight);
+
+        CGFloat extraBuffer = MAX(0, kScrollVisibilityBuffer - systemComfortPadding);
+
+        CGRect responderRect = [responder convertRect:responder.bounds toView:scrollView];
+
+        if (extraBuffer > 0) {
+          responderRect.size.height += extraBuffer;
+        }
+
+        [scrollView scrollRectToVisible:responderRect animated:YES];
+      }
+    });
+  }
+}
+
+- (TrueSheetViewController *)findSheetViewController {
+  UIResponder *responder = self;
+  while (responder) {
+    if ([responder isKindOfClass:[TrueSheetViewController class]]) {
+      return (TrueSheetViewController *)responder;
+    }
+    responder = responder.nextResponder;
+  }
+  return nil;
+}
+
+- (void)setFooterHeight:(CGFloat)footerHeight {
+  if (_footerHeight == footerHeight) {
+    [self applyFooterSafeArea];
+    return;
+  }
+  _footerHeight = footerHeight;
+  [self applyFooterSafeArea];
+}
+
+- (void)applyFooterSafeArea {
+  BOOL isDisabled = [self isFooterInsetFixDisabled];
+
+  TrueSheetViewController *sheetVC = [self findSheetViewController];
+  if (sheetVC) {
+    UIEdgeInsets currentInsets = sheetVC.additionalSafeAreaInsets;
+    if (fabs(currentInsets.bottom - _footerHeight) > 0.5) {
+      if (!isDisabled) {
+        sheetVC.additionalSafeAreaInsets = UIEdgeInsetsMake(
+            currentInsets.top, currentInsets.left, _footerHeight, currentInsets.right);
+      }
+    }
+  }
+
+  if (_pinnedScrollView) {
+    UIScrollView *scrollView = _pinnedScrollView.scrollView;
+
+    if (_footerHeight > 0) {
+      if (!_didOverrideAdjustmentBehavior) {
+        _originalAdjustmentBehavior = scrollView.contentInsetAdjustmentBehavior;
+        _didOverrideAdjustmentBehavior = YES;
+      }
+      if (!isDisabled) {
+        scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
+      }
+    } else if (_didOverrideAdjustmentBehavior) {
+      if (!isDisabled) {
+        scrollView.contentInsetAdjustmentBehavior = _originalAdjustmentBehavior;
+      }
+      _didOverrideAdjustmentBehavior = NO;
+    }
+  }
+
+  [self applyFooterInsetsToScrollView];
+}
+
+- (RCTScrollViewComponentView *)findScrollView:(UIView **)outTopSibling {
   if (self.subviews.count == 0) {
     return nil;
   }
@@ -164,6 +380,10 @@ using namespace facebook::react;
     }
   }
 
+  if (outTopSibling) {
+    *outTopSibling = [self findTopSiblingForScrollView:scrollView];
+  }
+
   return scrollView;
 }
 
@@ -176,63 +396,48 @@ using namespace facebook::react;
   return nil;
 }
 
-#pragma mark - TrueSheetKeyboardObserverDelegate
-
-- (void)keyboardWillShow:(CGFloat)height duration:(NSTimeInterval)duration curve:(UIViewAnimationOptions)curve {
-  if (!_pinnedScrollView) {
-    return;
+- (UIView *)findTopSiblingForScrollView:(RCTScrollViewComponentView *)scrollView {
+  if (!scrollView || scrollView.superview != self || self.subviews.count <= 1) {
+    return nil;
   }
 
-  TrueSheetViewController *sheetController = _keyboardObserver.viewController;
-  UIView *firstResponder = sheetController ? [sheetController.view findFirstResponder] : nil;
+  CGFloat scrollViewTop = CGRectGetMinY(scrollView.frame);
+  UIView *topSibling = nil;
+  CGFloat closestDistance = CGFLOAT_MAX;
 
-  [UIView animateWithDuration:duration
-                        delay:0
-                      options:curve | UIViewAnimationOptionBeginFromCurrentState
-                   animations:^{
-                     UIEdgeInsets contentInset = self->_pinnedScrollView.scrollView.contentInset;
-                     contentInset.bottom = height;
-                     self->_pinnedScrollView.scrollView.contentInset = contentInset;
+  for (UIView *sibling in self.subviews) {
+    if (sibling == scrollView || [sibling isKindOfClass:TrueSheetView.class]) {
+      continue;
+    }
 
-                     UIEdgeInsets indicatorInsets = self->_pinnedScrollView.scrollView.verticalScrollIndicatorInsets;
-                     indicatorInsets.bottom = self->_originalIndicatorBottomInset + height;
-                     self->_pinnedScrollView.scrollView.verticalScrollIndicatorInsets = indicatorInsets;
-
-                     if (firstResponder) {
-                       CGRect responderFrame = [firstResponder convertRect:firstResponder.bounds
-                                                                    toView:self->_pinnedScrollView.scrollView];
-                       responderFrame.size.height += self.keyboardScrollOffset;
-                       [self->_pinnedScrollView.scrollView scrollRectToVisible:responderFrame animated:NO];
-                     }
-                   }
-                   completion:nil];
-}
-
-- (void)keyboardWillHide:(NSTimeInterval)duration curve:(UIViewAnimationOptions)curve {
-  if (!_pinnedScrollView) {
-    return;
+    CGFloat siblingBottom = CGRectGetMaxY(sibling.frame);
+    if (siblingBottom <= scrollViewTop) {
+      CGFloat distance = scrollViewTop - siblingBottom;
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        topSibling = sibling;
+      }
+    }
   }
 
-  [UIView animateWithDuration:duration
-                        delay:0
-                      options:curve | UIViewAnimationOptionBeginFromCurrentState
-                   animations:^{
-                     UIEdgeInsets contentInset = self->_pinnedScrollView.scrollView.contentInset;
-                     contentInset.bottom = self->_bottomInset;
-                     self->_pinnedScrollView.scrollView.contentInset = contentInset;
-
-                     UIEdgeInsets indicatorInsets = self->_pinnedScrollView.scrollView.verticalScrollIndicatorInsets;
-                     indicatorInsets.bottom = self->_originalIndicatorBottomInset;
-                     self->_pinnedScrollView.scrollView.verticalScrollIndicatorInsets = indicatorInsets;
-                   }
-                   completion:nil];
+  return topSibling;
 }
 
 #pragma mark - Lifecycle
 
 - (void)prepareForRecycle {
   [super prepareForRecycle];
-  [self clearScrollable];
+
+  TrueSheetViewController *sheetVC = [self findSheetViewController];
+  if (sheetVC) {
+    UIEdgeInsets currentInsets = sheetVC.additionalSafeAreaInsets;
+    sheetVC.additionalSafeAreaInsets = UIEdgeInsetsMake(
+        currentInsets.top, currentInsets.left, 0, currentInsets.right);
+  }
+
+  [self clearPinning];
+  _footerHeight = 0;
+  _keyboardHeight = 0;
 }
 
 @end

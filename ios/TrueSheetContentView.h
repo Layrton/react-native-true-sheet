@@ -12,7 +12,6 @@
 #import <React/RCTViewComponentView.h>
 #import <UIKit/UIKit.h>
 #import <react/renderer/core/LayoutMetrics.h>
-#import "core/TrueSheetKeyboardObserver.h"
 
 @class TrueSheetViewController;
 @class RCTScrollViewComponentView;
@@ -23,28 +22,29 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)contentViewDidChangeSize:(CGSize)newSize;
 - (void)contentViewDidChangeChildren;
+- (void)contentViewDidChangeInsets;
 
 @end
 
-@interface TrueSheetContentView : RCTViewComponentView <TrueSheetKeyboardObserverDelegate>
+@interface TrueSheetContentView : RCTViewComponentView
 
 @property (nonatomic, weak, nullable) id<TrueSheetContentViewDelegate> delegate;
-@property (nonatomic, assign) CGFloat keyboardScrollOffset;
-@property (nonatomic, weak, nullable) TrueSheetKeyboardObserver *keyboardObserver;
 
-- (RCTScrollViewComponentView *_Nullable)findScrollView;
+- (RCTScrollViewComponentView *_Nullable)findScrollView:(UIView *_Nullable *_Nullable)outTopSibling;
 
 /**
- * Setup scrollable content
- * @param enabled Whether scrollable is enabled
- * @param bottomInset Bottom content inset for the scroll view
+ * Setup ScrollView pinning
+ * @param pinned Whether to pin the scroll view
  */
-- (void)setupScrollable:(BOOL)enabled bottomInset:(CGFloat)bottomInset;
+- (void)setupScrollViewPinning:(BOOL)pinned;
 
 /**
- * Update the pinned scroll view's height to fill the container
+ * Set the footer height to be included in the view controller's additionalSafeAreaInsets.
+ * This ensures iOS's automaticallyAdjustKeyboardInsets accounts for the footer when
+ * calculating scroll-into-view behavior for focused inputs.
+ * @param footerHeight The footer height to add to safe area insets
  */
-- (void)updateScrollViewHeight;
+- (void)setFooterHeight:(CGFloat)footerHeight;
 
 @end
 

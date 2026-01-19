@@ -12,9 +12,6 @@
 #import "TrueSheetContentView.h"
 #import "TrueSheetFooterView.h"
 #import "TrueSheetHeaderView.h"
-#import "TrueSheetViewController.h"
-#import "core/TrueSheetKeyboardObserver.h"
-#import "utils/WindowUtil.h"
 
 #import <react/renderer/components/TrueSheetSpec/ComponentDescriptors.h>
 #import <react/renderer/components/TrueSheetSpec/EventEmitters.h>
@@ -26,15 +23,17 @@
 
 using namespace facebook::react;
 
-@interface TrueSheetContainerView () <TrueSheetContentViewDelegate, TrueSheetHeaderViewDelegate>
+@interface TrueSheetContainerView () <TrueSheetContentViewDelegate,
+                                      TrueSheetHeaderViewDelegate,
+                                      TrueSheetFooterViewDelegate>
 @end
 
 @implementation TrueSheetContainerView {
   TrueSheetContentView *_contentView;
   TrueSheetHeaderView *_headerView;
   TrueSheetFooterView *_footerView;
-  TrueSheetKeyboardObserver *_keyboardObserver;
-  BOOL _scrollableSet;
+  CGFloat _footerInsetCache;
+  BOOL _scrollViewPinningSet;
 }
 
 #pragma mark - Initialization
@@ -52,17 +51,13 @@ using namespace facebook::react;
     _contentView = nil;
     _headerView = nil;
     _footerView = nil;
-    _scrollableSet = NO;
+    _footerInsetCache = 0;
+    _scrollViewPinningSet = NO;
   }
   return self;
 }
 
 #pragma mark - Layout
-
-- (void)layoutSubviews {
-  [super layoutSubviews];
-  [_contentView updateScrollViewHeight];
-}
 
 - (CGFloat)contentHeight {
   return _contentView ? _contentView.frame.size.height : 0;
@@ -81,28 +76,15 @@ using namespace facebook::react;
   }
 }
 
-- (void)setScrollableEnabled:(BOOL)scrollableEnabled {
-  _scrollableEnabled = scrollableEnabled;
-  _scrollableSet = YES;
+- (void)setScrollViewPinningEnabled:(BOOL)scrollViewPinningEnabled {
+  _scrollViewPinningEnabled = scrollViewPinningEnabled;
+  _scrollViewPinningSet = YES;
 }
 
-- (void)setScrollableOptions:(NSDictionary *)scrollableOptions {
-  _scrollableOptions = scrollableOptions;
-  if (scrollableOptions) {
-    NSNumber *offset = scrollableOptions[@"keyboardScrollOffset"];
-    _contentView.keyboardScrollOffset = offset ? [offset floatValue] : 0;
-  } else {
-    _contentView.keyboardScrollOffset = 0;
-  }
-}
-
-- (void)setupScrollable {
-  if (_scrollableSet && _contentView) {
-    CGFloat bottomInset = 0;
-    if ([_insetAdjustment isEqualToString:@"automatic"]) {
-      bottomInset = [WindowUtil keyWindow].safeAreaInsets.bottom;
-    }
-    [_contentView setupScrollable:_scrollableEnabled bottomInset:bottomInset];
+- (void)setupContentScrollViewPinning {
+  if (_scrollViewPinningSet && _contentView) {
+    [_contentView setFooterHeight:_footerInsetCache];
+    [_contentView setupScrollViewPinning:_scrollViewPinningEnabled];
   }
 }
 
@@ -118,6 +100,9 @@ using namespace facebook::react;
     }
     _contentView = (TrueSheetContentView *)childComponentView;
     _contentView.delegate = self;
+    if (_footerInsetCache > 0) {
+      [_contentView setFooterHeight:_footerInsetCache];
+    }
   }
 
   if ([childComponentView isKindOfClass:[TrueSheetHeaderView class]]) {
@@ -136,6 +121,7 @@ using namespace facebook::react;
       return;
     }
     _footerView = (TrueSheetFooterView *)childComponentView;
+    _footerView.delegate = self;
   }
 }
 
@@ -152,7 +138,9 @@ using namespace facebook::react;
   }
 
   if ([childComponentView isKindOfClass:[TrueSheetFooterView class]]) {
+    _footerView.delegate = nil;
     _footerView = nil;
+    [_contentView setFooterHeight:0];
   }
 
   [super unmountChildComponentView:childComponentView index:index];
@@ -169,7 +157,11 @@ using namespace facebook::react;
 }
 
 - (void)contentViewDidChangeChildren {
-  [self setupScrollable];
+  [self setupContentScrollViewPinning];
+}
+
+- (void)contentViewDidChangeInsets {
+  [self setupContentScrollViewPinning];
 }
 
 #pragma mark - TrueSheetHeaderViewDelegate
@@ -178,35 +170,35 @@ using namespace facebook::react;
   [self.delegate containerViewHeaderDidChangeSize:newSize];
 }
 
-#pragma mark - Keyboard Observer
+#pragma mark - TrueSheetFooterViewDelegate
 
-- (void)setupKeyboardObserverWithViewController:(UIViewController *)viewController {
-  [self cleanupKeyboardObserver];
-
-  _keyboardObserver = [[TrueSheetKeyboardObserver alloc] init];
-  _keyboardObserver.viewController = (TrueSheetViewController *)viewController;
-
+- (void)footerViewDidChangeBottomInset:(CGFloat)bottomInset {
+  _footerInsetCache = bottomInset;
   if (_contentView) {
-    _contentView.keyboardObserver = _keyboardObserver;
-    [_keyboardObserver addDelegate:_contentView];
+    [_contentView setFooterHeight:bottomInset];
   }
-
-  if (_footerView) {
-    _footerView.keyboardObserver = _keyboardObserver;
-    [_keyboardObserver addDelegate:_footerView];
+  if ([self.delegate respondsToSelector:@selector(containerViewFooterDidChangeInset:)]) {
+    [self.delegate containerViewFooterDidChangeInset:bottomInset];
   }
-
-  [_keyboardObserver start];
 }
 
-- (void)cleanupKeyboardObserver {
-  if (_keyboardObserver) {
-    [_keyboardObserver stop];
-    _keyboardObserver = nil;
-  }
+#pragma mark - Keyboard Handling
 
-  _contentView.keyboardObserver = nil;
-  _footerView.keyboardObserver = nil;
+- (void)setupKeyboardHandler {
+  [_footerView setupKeyboardHandler];
+}
+
+- (void)cleanupKeyboardHandler {
+  [_footerView cleanupKeyboardHandler];
+}
+
+#pragma mark - External Footer Height Cache
+
+- (void)setExternalFooterHeightCache:(CGFloat)footerHeight {
+  _footerInsetCache = footerHeight;
+  if (_contentView) {
+    [_contentView setFooterHeight:footerHeight];
+  }
 }
 
 @end
